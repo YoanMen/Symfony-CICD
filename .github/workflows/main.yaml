@@ -1,0 +1,101 @@
+name: CI/CD
+
+on: [push, pull_request]
+
+jobs:
+  symfony-tests:
+    name: 🛠️ Build and Test
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: database
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=3
+
+    steps:
+      - name: 🚚 Get latest code
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 🔧 Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+
+      - name: Copy .env.test.local
+        run: php -r "file_exists('.env.test.local') || copy('.env.test', '.env.test.local');"
+
+      - name: Cache Composer packages
+        id: composer-cache
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: ${{ runner.os }}-php-${{ hashFiles('**/composer.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-php-
+
+      - name: Install Dependencies
+        run: composer install -q --no-ansi --no-interaction --no-scripts --no-progress --prefer-dist
+
+      - name: execute PHP-cs-fixer
+        run: ./vendor/bin/php-cs-fixer fix --diff --allow-risky=yes
+
+      - name: execute PHPStan
+        uses: php-actions/phpstan@v3
+        with:
+          path: src/
+
+      - name: Wait for MySQL
+        run: |
+          until mysqladmin ping --host 127.0.0.1 --port 3306 --user root --password=root --silent; do
+            echo "Waiting for MySQL to be ready..."
+            sleep 5
+          done
+
+      - name: Set up .env.test.local
+        run: |
+          echo "DATABASE_URL=mysql://root:root@127.0.0.1:3306/database" > .env.test.local
+
+      - name: create database
+        run: php bin/console doctrine:database:create --no-interaction --env=test
+
+      - name: Migrate database
+        run: php bin/console  doctrine:migrations:migrate --no-interaction --env=test
+
+      - name: Load fixtures
+        run: php bin/console doctrine:fixtures:load --no-interaction --env=test
+
+      - name: Execute tests (Unit and Feature tests) via PHPUnit
+        run: vendor/bin/phpunit
+
+  web-deploy:
+    name: 🎉 Deploy
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    needs: symfony-tests
+    steps:
+      - name: 🚚 Get latest code
+        uses: actions/checkout@v4
+
+      - name: 📂 Sync files
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.ftp_server }}
+          username: ${{ secrets.ftp_username }}
+          password: ${{ secrets.ftp_password }}
+          port: 21
+          exclude: |
+            **/.git*
+            **/.git*/**
